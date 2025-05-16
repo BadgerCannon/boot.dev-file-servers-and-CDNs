@@ -89,6 +89,19 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	processedFilePath, err := processVideoForFastStart(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to process video for fast start", err)
+		return
+	}
+	processedFile, err := os.Open(processedFilePath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to open processed video", err)
+		return
+	}
+	defer os.Remove(processedFilePath)
+	defer processedFile.Close()
+
 	randStr := make([]byte, 32)
 	_, err = rand.Read(randStr)
 	if err != nil {
@@ -101,7 +114,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
 		Key:         &videoObjectKey,
-		Body:        tempFile,
+		Body:        processedFile,
 		ContentType: &mimeType,
 	})
 	if err != nil {
@@ -138,13 +151,23 @@ func getVideoAspectRatio(filePath string) (string, error) {
 		log.Println("Failed to decode json from ffprobe output")
 	}
 
-	aspectRatio := Ratio{
-		Width:  ffprobeResult.Streams[0].Width,
-		Height: ffprobeResult.Streams[0].Height,
-	}
+	aspectRatio := ffprobeResult.Streams[0]
 	aspectRatio.Reduce()
 
 	log.Printf("Video aspect ratio: %v", aspectRatio)
 	log.Printf("Video orientation:  %s", aspectRatio.Orientation())
 	return aspectRatio.Orientation(), nil
+}
+
+func processVideoForFastStart(filePath string) (string, error) {
+	processedFilePath := filePath + ".processing"
+	ffmpegCmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", "-movflags", "faststart", "-f", "mp4", processedFilePath)
+
+	err := ffmpegCmd.Run()
+	if err != nil {
+		log.Println("ffmpeg command failed")
+		return "", err
+	}
+
+	return processedFilePath, nil
 }
