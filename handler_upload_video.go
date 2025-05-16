@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -80,19 +83,24 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	prefix, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to calculate aspect ratio", err)
+		return
+	}
+
 	randStr := make([]byte, 32)
 	_, err = rand.Read(randStr)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error generating file name", err)
 		return
 	}
-	videoFileName := base64.RawURLEncoding.EncodeToString(randStr) + ".mp4"
+	videoObjectKey := prefix + "/" + base64.RawURLEncoding.EncodeToString(randStr) + ".mp4"
 
-	log.Println("Uploading to S3")
-
+	log.Printf("Uploading %s to S3\n", videoObjectKey)
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      &cfg.s3Bucket,
-		Key:         &videoFileName,
+		Key:         &videoObjectKey,
 		Body:        tempFile,
 		ContentType: &mimeType,
 	})
@@ -100,13 +108,43 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusInternalServerError, "Failed to upload to S3", err)
 		return
 	}
+	log.Println("Upload complete")
 
-	s3VideoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, videoFileName)
+	s3VideoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, videoObjectKey)
 	dbVideo.VideoURL = &s3VideoURL
 	err = cfg.db.UpdateVideo(dbVideo)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to update video in database", err)
 		return
 	}
+}
 
+func getVideoAspectRatio(filePath string) (string, error) {
+	ffprobeCmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	cmdOutput := bytes.NewBuffer([]byte{})
+	ffprobeCmd.Stdout = cmdOutput
+	err := ffprobeCmd.Run()
+	if err != nil {
+		log.Println("Error when running ffprobe", err)
+		return "", err
+	}
+
+	jd := json.NewDecoder(cmdOutput)
+	var ffprobeResult struct {
+		Streams []Ratio `json:"streams"`
+	}
+	err = jd.Decode(&ffprobeResult)
+	if err != nil {
+		log.Println("Failed to decode json from ffprobe output")
+	}
+
+	aspectRatio := Ratio{
+		Width:  ffprobeResult.Streams[0].Width,
+		Height: ffprobeResult.Streams[0].Height,
+	}
+	aspectRatio.Reduce()
+
+	log.Printf("Video aspect ratio: %v", aspectRatio)
+	log.Printf("Video orientation:  %s", aspectRatio.Orientation())
+	return aspectRatio.Orientation(), nil
 }
