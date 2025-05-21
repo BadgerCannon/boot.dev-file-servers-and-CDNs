@@ -36,7 +36,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	log.Println("uploading thumbnail for video", videoID, "by user", userID)
+	log.Println("Uploading thumbnail for video", videoID, "by user", userID)
 	dbVideo, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Error looking up video", err)

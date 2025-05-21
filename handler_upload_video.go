@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -12,9 +13,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
+	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/database"
 	"github.com/google/uuid"
 )
 
@@ -123,13 +127,46 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 	}
 	log.Println("Upload complete")
 
-	s3VideoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, videoObjectKey)
+	// s3VideoURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.s3Bucket, cfg.s3Region, videoObjectKey)
+	s3VideoURL := fmt.Sprintf("%s,%s", cfg.s3Bucket, videoObjectKey)
 	dbVideo.VideoURL = &s3VideoURL
 	err = cfg.db.UpdateVideo(dbVideo)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Failed to update video in database", err)
 		return
 	}
+}
+
+func generatePresignedURL(s3Client *s3.Client, bucket, key string, expireTime time.Duration) (string, error) {
+	presignClient := s3.NewPresignClient(s3Client)
+	presignedGetReq, err := presignClient.PresignGetObject(
+		context.Background(),
+		&s3.GetObjectInput{
+			Bucket: &bucket,
+			Key:    &key,
+		},
+		s3.WithPresignExpires(expireTime),
+	)
+	if err != nil {
+		log.Println("Failed to generate presigned URL")
+		return "", err
+	}
+
+	return presignedGetReq.URL, nil
+}
+
+func (cfg *apiConfig) dbVideoToSignedVideo(video database.Video) (database.Video, error) {
+	s3InfoSlice := strings.Split(*video.VideoURL, ",")
+	if len(s3InfoSlice) != 2 {
+		return video, fmt.Errorf("VideoURL does not match format '{bucket},{key}: %s", *video.VideoURL)
+	}
+	presignedURL, err := generatePresignedURL(cfg.s3Client, s3InfoSlice[0], s3InfoSlice[1], 60*time.Second)
+	if err != nil {
+		log.Println("Failed to generate presigned URL from VideoURL")
+		return video, err
+	}
+	video.VideoURL = &presignedURL
+	return video, nil
 }
 
 func getVideoAspectRatio(filePath string) (string, error) {
